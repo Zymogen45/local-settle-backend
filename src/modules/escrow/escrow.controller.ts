@@ -7,6 +7,7 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -19,15 +20,26 @@ import { OpenEscrowDto } from './dto/open-escrow.dto';
 import { InitializeEscrowDto } from './dto/initialize-escrow.dto';
 import { FundEscrowDto } from './dto/fund-escrow.dto';
 import type { UploadFileInput } from '../file-storage/file-storage.service';
+import {
+  EVIDENCE_FILE_SIZE_LIMIT,
+  MULTIPART_FIELD_LIMITS,
+} from '../../common/request-limits';
 import { FiatSentDto } from './dto/fiat-sent.dto';
 import { ReleaseEscrowDto } from './dto/release-escrow.dto';
 import { SyncEscrowDto } from './dto/sync-escrow.dto';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import type { EscrowAuditContext } from './escrow.service';
 import { EscrowService } from './escrow.service';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { SetupCompleteGuard } from '../auth/setup-complete.guard';
 import { ResourceOwnerGuard } from '../../common/guards/resource-owner.guard';
 import { ResourceOwner } from '../../common/decorators/resource-owner.decorator';
 import { ResourceType } from '../../common/interfaces/resource-owner.interface';
+import type { Request } from 'express';
+
+type AuthenticatedRequest = Request & {
+  user?: { userId?: string; sub?: string };
+};
 
 @Controller('escrows')
 export class EscrowController {
@@ -75,8 +87,23 @@ export class EscrowController {
   @Post('sync')
   @UseGuards(JwtAuthGuard, ResourceOwnerGuard)
   @ResourceOwner(ResourceType.ESCROW, 'escrowId')
-  sync(@Body() dto: SyncEscrowDto) {
-    return this.service.syncTransaction(dto);
+  sync(
+    @Body() dto: SyncEscrowDto,
+    @Req() request: AuthenticatedRequest,
+    @CurrentUser() user: { userId: string },
+  ) {
+    const correlationHeader = request.headers['x-correlation-id'];
+    const requestIdHeader = request.headers['x-request-id'];
+    const auditContext: EscrowAuditContext = {
+      userId: user.userId,
+      ipAddress: request.ip,
+      userAgent: request.headers['user-agent'],
+      correlationId:
+        (typeof correlationHeader === 'string' && correlationHeader) ||
+        (typeof requestIdHeader === 'string' && requestIdHeader) ||
+        undefined,
+    };
+    return this.service.syncTransaction(dto, auditContext);
   }
 
   /** Mark that the buyer has sent fiat payment */
@@ -92,13 +119,32 @@ export class EscrowController {
   @UseGuards(JwtAuthGuard, SetupCompleteGuard, ResourceOwnerGuard)
   @ResourceOwner(ResourceType.ESCROW)
   @UseInterceptors(
-    FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }),
+    FileInterceptor('file', {
+      limits: {
+        fileSize:
+          Number(process.env.EVIDENCE_MAX_FILE_BYTES) || EVIDENCE_FILE_SIZE_LIMIT,
+        ...MULTIPART_FIELD_LIMITS,
+      },
+    }),
   )
   uploadEvidence(
     @Param('id') id: string,
     @UploadedFile() file?: UploadFileInput,
+    @Req() request?: AuthenticatedRequest,
   ) {
-    return this.service.uploadEvidence(id, file);
+    return this.service.uploadEvidence(
+      id,
+      file,
+      request?.user?.userId ?? request?.user?.sub,
+    );
+  }
+
+  /** Return a short-lived evidence link to an order participant. */
+  @Get(':id/evidence')
+  @UseGuards(JwtAuthGuard, ResourceOwnerGuard)
+  @ResourceOwner(ResourceType.ESCROW)
+  getEvidenceDownloadUrl(@Param('id') id: string) {
+    return this.service.getEvidenceDownloadUrl(id);
   }
 
   /** Get escrow status with live on-chain data */

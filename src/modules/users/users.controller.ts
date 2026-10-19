@@ -28,6 +28,11 @@ import { SetupCompleteGuard } from '../auth/setup-complete.guard';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
 import type { UploadFileInput } from '../file-storage/file-storage.service';
+import {
+  MULTIPART_FIELD_LIMITS,
+  PROFILE_IMAGE_SIZE_LIMIT,
+} from '../../common/request-limits';
+import { getCurrencyMetadata } from '../../lib/currency-metadata';
 
 @Controller('users')
 export class UsersController {
@@ -64,6 +69,20 @@ export class UsersController {
     return this.service.isAliasAvailable(query.alias);
   }
 
+  @Get('currency-metadata/:currency')
+  getCurrencyMetadata(
+    @Param('currency') currency: string,
+    @Query('locale') locale = 'en-US',
+  ) {
+    const metadata = getCurrencyMetadata(currency, locale);
+    if (!metadata) {
+      throw new BadRequestException(
+        'Currency must be a supported ISO 4217 code and locale must be valid',
+      );
+    }
+    return { success: true, data: metadata };
+  }
+
   @UseGuards(JwtAuthGuard)
   @Post(':id/setup')
   setup(@Param('id') id: string, @Body() dto: SetupAccountDto) {
@@ -98,7 +117,12 @@ export class UsersController {
   @UseGuards(JwtAuthGuard, SetupCompleteGuard)
   @Patch(':id/profile-picture')
   @UseInterceptors(
-    FileInterceptor('profileImage', { limits: { fileSize: 5 * 1024 * 1024 } }),
+    FileInterceptor('profileImage', {
+      limits: {
+        fileSize: PROFILE_IMAGE_SIZE_LIMIT,
+        ...MULTIPART_FIELD_LIMITS,
+      },
+    }),
   )
   async uploadProfilePicture(
     @Param('id') id: string,
@@ -133,7 +157,7 @@ export class UsersController {
       );
     }
 
-    const maxFileSize = 5 * 1024 * 1024;
+    const maxFileSize = PROFILE_IMAGE_SIZE_LIMIT;
     if (file.size > maxFileSize) {
       throw new BadRequestException('Profile image must be 5MB or smaller');
     }

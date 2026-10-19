@@ -22,6 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Check required environment variable documentation
+        run: node scripts/check-env-docs.js
+
       - uses: pnpm/action-setup@v4
         with:
           version: 11.13.0
@@ -42,6 +45,17 @@ jobs:
       - run: pnpm run lint
 
       - run: pnpm run test
+
+      - name: Generate OpenAPI contract
+        run: pnpm run openapi:generate
+
+      - name: Publish OpenAPI contract artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-settle-openapi-${{ github.sha }}
+          path: contracts/openapi.json
+          if-no-files-found: error
+          retention-days: 30
 
   deploy:
     name: Build & Deploy to Cloud Run

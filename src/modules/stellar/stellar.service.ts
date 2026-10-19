@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   Asset,
@@ -37,9 +37,20 @@ export interface TransactionRecord {
   amount: string | null;
   asset: string | null;
   asset_issuer: string | null;
+  /** Explicit asset identity; legacy `asset` and `asset_issuer` remain available. */
+  asset_descriptor: {
+    type: string;
+    code: string;
+    issuer: string | null;
+  };
   from: string | null;
   to: string | null;
   direction: 'received' | 'sent';
+}
+
+export interface TransactionPage {
+  records: TransactionRecord[];
+  nextCursor?: string;
 }
 
 export interface PaymentResult {
@@ -146,20 +157,43 @@ export class StellarService {
   async getTransactions(
     publicKey: string,
     limit = 10,
-  ): Promise<TransactionRecord[]> {
+    cursor?: string,
+  ): Promise<TransactionPage> {
     this.assertPublicKey(publicKey);
 
-    try {
-      const res = await this.horizonRequest(() =>
-        this.server
-          .payments()
-          .forAccount(publicKey)
-          .order('desc')
-          .limit(Math.min(Math.max(limit, 1), 200))
-          .call(),
-      );
+    if (cursor !== undefined && cursor !== 'now' && !/^\d+$/.test(cursor)) {
+      throw new BadRequestException('Cursor must be a Stellar payments cursor.');
+    }
 
-      return res.records.map((op): TransactionRecord => {
+    const pageSize = Math.min(Math.max(Math.trunc(limit) || 10, 1), 200);
+
+    try {
+      let query = this.server
+        .payments()
+        .forAccount(publicKey)
+        .order('desc')
+        // Horizon caps page size at 200. At that cap, probe the next cursor
+        // separately rather than requesting an invalid 201-record page.
+        .limit(pageSize < 200 ? pageSize + 1 : pageSize);
+      if (cursor) query = query.cursor(cursor);
+      const res = await this.horizonRequest(() => query.call());
+
+      let hasMore = res.records.length > pageSize;
+      const pageRecords = res.records.slice(0, pageSize);
+      if (pageSize === 200 && pageRecords.length === 200) {
+        const lastId = String(pageRecords[pageRecords.length - 1].id);
+        const probe = await this.horizonRequest(() =>
+          this.server
+            .payments()
+            .forAccount(publicKey)
+            .order('desc')
+            .cursor(lastId)
+            .limit(1)
+            .call(),
+        );
+        hasMore = probe.records.length > 0;
+      }
+      const records = pageRecords.map((op): TransactionRecord => {
         const o = op as unknown as OperationFields;
         return {
           id: o.id,
@@ -169,12 +203,23 @@ export class StellarService {
           amount: o.amount ?? null,
           asset: o.asset_type === 'native' ? 'XLM' : (o.asset_code ?? null),
           asset_issuer: o.asset_issuer ?? null,
+          asset_descriptor: {
+            type: o.asset_type ?? 'unknown',
+            code: o.asset_type === 'native' ? 'XLM' : (o.asset_code ?? ''),
+            issuer: o.asset_type === 'native' ? null : (o.asset_issuer ?? null),
+          },
           from: o.from ?? o.funder ?? null,
           to: o.to ?? o.account ?? null,
           direction:
             o.to === publicKey || o.account === publicKey ? 'received' : 'sent',
         };
       });
+      return {
+        records,
+        ...(hasMore && pageRecords.length
+          ? { nextCursor: String(pageRecords[pageRecords.length - 1].id) }
+          : {}),
+      };
     } catch (err: unknown) {
       const horizonErr = err as HorizonError;
       if (horizonErr?.response?.status === 404) {
